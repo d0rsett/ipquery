@@ -11,16 +11,19 @@ A fast and efficient IP address query API built in Go. **IPQuery** provides geol
 - **REST API**: Simple HTTP/REST endpoints for IP queries
 - **Docker Support**: Ready-to-deploy containerized application
 - **GeoLite Integration**: Uses [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/) free databases for accurate geolocation data
+- **Terminal Output**: Aligned JSON with server-side ANSI colors for curl, HTTPie, Wget, and xh
+- **Responsive Web UI**: IPv4/IPv6 search, JSON/table views, a location map, and built-in request examples
 
 ![Screenshot from 2026-01-07 12-06-39.png](assets/Screenshot%20from%202026-01-07%2012-06-39.png)
 
 ## Prerequisites
 
 > [!IMPORTANT]
-> This service relies on seeing the real client IP at the edge.
-> It must be deployed on infrastructure with a public IP address (VPS or equivalent) and a valid FQDN.
-> If you deploy in private-only network and expose the service via tunnels (e.g. Cloudflare or Pangolin) 
-> choose the _caddy_ option and expose via Caddy or equivalent. Deployments behind private-only networks only are not supported.
+> Run locally with Go or Docker for development. For useful own-IP geolocation in
+> production, the service must receive the public client IP. When using Caddy or
+> another reverse proxy, configure `TRUSTED_PROXY_CIDRS` for the proxy network and
+> forward the client address. Private IPs may have no GeoLite location data; the
+> web UI displays an unavailable-location message instead of a map marker.
 
 ## Installation
 
@@ -29,7 +32,7 @@ A fast and efficient IP address query API built in Go. **IPQuery** provides geol
 Clone the repository:
 
 ```bash
-git clone https://github.com/akyriako/ipquery.git
+git clone https://github.com/d0rsett/ipquery.git
 cd ipquery
 ```
 
@@ -52,15 +55,25 @@ The API will be available at `http://localhost:8080`
 Build and run with Docker:
 
 ```bash
-docker build -t ipquery:latest .
-docker run -p 8080:8080 ipquery:latest
+docker build -t ipquery:local .
+docker run --rm --name ipquery-local -p 127.0.0.1:8080:8080 ipquery:local
 ```
 
 > [!NOTE]
 > That is a simple quick way to run the server, without the risk assessment enricher. For that you need to get 
 > an API KEY from [AbuseIP**DB**](https://www.abuseipdb.com/) and set it as environment variable `ABUSEIPDB_API_KEY`.
 
+Open [http://localhost:8080/](http://localhost:8080/) in a browser, or run
+`curl http://localhost:8080/` for colored terminal output. The command above binds
+only to localhost. For a server deployment, publish the port on the required
+interface or expose the API through a reverse proxy.
+
 ### Docker Compose (with Caddy)
+
+The deployment files below are inherited upstream examples and reference upstream
+images. To run this fork's changes, first build this checkout and replace the API
+service's image with `ipquery:local` (or your own image tag) before starting Compose.
+Do the same for the Kong example. No upstream image includes local changes.
 
 Use the included deployment files:
 
@@ -243,6 +256,146 @@ networks:
 
 ## API Endpoints
 
+The following table describes the default configuration (`IPQUERY_DEFAULT_FORMAT=auto`):
+
+| Route | Browser | curl |
+| --- | --- | --- |
+| `/` | Web interface | Colored, aligned own-IP metadata |
+| `/own` | Plain IP address | Plain IP address |
+| `/own/all` | Readable JSON for your IP | Colored, aligned own-IP metadata |
+| `/lookup/{ip}` | Readable JSON for the specified IPv4/IPv6 | Colored, aligned metadata |
+| `/health` | `ok` | `ok` |
+
+### Web interface
+
+The web interface accepts IPv4 and IPv6 addresses and offers JSON and table views.
+Expand **How to use the API** for English curl examples. Commands use the current
+deployment URL, including a reverse proxy path prefix.
+
+Below **1024 px**, results and the map stack in one column and the page scrolls.
+At 1024 px and above, they appear side by side. On narrow phones, the search input
+and button also stack; long JSON and command examples scroll inside their panels.
+Short desktop windows scroll as needed, including when the API help is expanded.
+Location data is approximate. IPs without GeoLite location data show a message
+instead of a misleading marker at zero latitude and longitude. The map uses
+MapLibre and OpenStreetMap tiles; external map resources require network access.
+
+### `/`
+
+Returns your own IP metadata to CLI and programmatic clients, using the same
+schema as `/own/all`. Browser navigation continues to open the existing web UI.
+Use `/?format=pretty` or `Accept: application/json` to request data in a browser.
+
+### Response formatting
+
+Formatting is available on `/`, `/own/all`, and `/lookup/{ip}`. IPv4 and IPv6
+use the same response schema and formatting. `/own` remains a plain IP string
+and `/health` remains `ok`; their query parameters do not change these contracts.
+
+```bash
+# Colorful, aligned metadata for your own IP (after deploying this version):
+curl ip.y00u.ru
+
+# The same behavior locally:
+curl http://localhost:8080
+
+# Explicit response modes:
+curl 'http://localhost:8080/lookup/8.8.8.8?format=json'
+curl 'http://localhost:8080/lookup/8.8.8.8?format=pretty'
+curl 'http://localhost:8080/lookup/2001:4860:4860::8888?format=ansi'
+curl 'http://localhost:8080/own/all?format=auto'
+
+# Scripts: request valid JSON explicitly, including when piping or saving output:
+curl -sS -H 'Accept: application/json' http://localhost:8080/own/all
+curl -sS 'http://localhost:8080/?format=json' > ip.json
+
+# Other supported CLI clients:
+http http://localhost:8080/own/all
+wget -qO- http://localhost:8080/own/all
+```
+
+| `format` | Output |
+| --- | --- |
+| `json` | Compact standard JSON, no ANSI |
+| `pretty` | Readable JSON with aligned colons, no ANSI |
+| `ansi` | Pretty JSON with server-generated terminal colors |
+| `auto` | Choose using `User-Agent` and `Accept` |
+
+An explicit `format` overrides the configured default and automatic detection.
+An explicit `format=auto` runs detection even when the configured default is
+another mode. Unknown, empty, or repeated format values return HTTP 400 on the
+metadata endpoints. Existing plain-text error responses are preserved.
+
+In auto mode, curl, HTTPie, GNU Wget (`Wget/`), and xh receive ANSI when
+`Accept` permits `text/plain`. A positive explicit `Accept: application/json`
+with a quality at least as high as the text alternatives requests standard JSON,
+including for CLI clients. Media quality weights and specific exclusions such as
+`text/plain;q=0` are respected when deciding whether to send ANSI. Browser API
+requests receive pretty JSON unless JSON is explicitly preferred; other clients
+receive standard JSON. The browser landing page remains available on `/`.
+
+HTTP cannot tell whether curl is attached to a terminal, redirected to a file,
+or piped into another program. Scripts should always set `format=json` or
+`Accept: application/json`; a bare curl request intentionally defaults to colors.
+
+Pretty output preserves struct field order and aligns keys separately within
+each object. Arrays and nested objects are indented, empty containers stay
+`{}` and `[]`, and every metadata response ends with a newline. Colors reset
+after each key or scalar: cyan keys, green strings, magenta numbers, blue
+booleans, and gray null; punctuation retains the terminal's default color.
+Common combining and East Asian wide characters are accounted for in key
+alignment; exact display width of emoji sequences can vary by terminal.
+
+ANSI responses use `Content-Type: text/plain; charset=utf-8`. Standard and pretty
+JSON use `application/json; charset=utf-8`. Responses vary by `User-Agent` and
+`Accept` for proxy caches. Caddy and other reverse proxies should forward these
+headers and preserve query strings. Existing `TRUSTED_PROXY_CIDRS` behavior for
+resolving the client IP is unchanged; trust only your actual proxy networks.
+
+### Formatting configuration
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `IPQUERY_DEFAULT_FORMAT` | `auto` | `auto`, `json`, `pretty`, or `ansi` |
+| `IPQUERY_COLOR_ENABLED` | `true` | Global color switch; `false` converts ANSI mode to pretty JSON, even when explicitly requested |
+| `IPQUERY_ALIGN_KEYS` | `true` | Align colons within each object in pretty/ANSI modes |
+| `IPQUERY_JSON_INDENT` | `2` | Spaces per nesting level, from 0 to 16 |
+
+Invalid configuration fails at startup. These options do not change compact JSON
+or the IP lookup/enrichment logic and require no additional dependencies.
+
+```bash
+docker build -t ipquery:local .
+docker run --rm -p 8080:8080 \
+  -e IPQUERY_DEFAULT_FORMAT=auto \
+  -e IPQUERY_COLOR_ENABLED=true \
+  -e IPQUERY_ALIGN_KEYS=true \
+  -e IPQUERY_JSON_INDENT=2 \
+  ipquery:local
+```
+
+Set the same variables under the API service's `environment` section in Docker
+Compose. Existing prebuilt upstream image tags do not include these changes;
+build this checkout and point your deployment at the resulting image.
+
+### Development checks and architecture
+
+```bash
+go test ./...
+go vet ./...
+go build -o bin/ipquery ./cmd
+docker build -t ipquery:local .
+```
+
+`api/lookup_client.go` resolves client IPs and the GeoLite/AbuseIPDB enrichers
+populate `LookupResult`. The HTTP handlers serialize that unchanged result once
+with `encoding/json`, then `response` handles ordered formatting and content
+negotiation. `cmd` loads environment configuration and registers the existing
+routes. Formatting tests cover JSON types, escaping, precision, Unicode, nesting,
+colors, alignment, and negotiation. Route tests exercise the actual router and
+bundled GeoLite databases, including IPv6 and trusted proxy requests; they do not
+call AbuseIPDB or require an API key.
+
 ### `/own`
 
 Resolves your own IP address, returns only the IP as `string`
@@ -265,8 +418,8 @@ Resolves your own IP address, returns all metadata found in MaxMind GeoLite2 dat
     "city": "Copenhagen",
     "state": "Capital Region",
     "zipcode": "XXXX",
-    "latitude": "XX.XXXX",
-    "longitude": "XX.XXXX",
+    "latitude": 55.6761,
+    "longitude": 12.5683,
     "timezone": "Europe/Copenhagen",
     "localtime": "2026-01-07T12:06:30+01:00"
   },
@@ -291,7 +444,7 @@ Resolves the requested IP address, returns all metadata found in MaxMind GeoLite
 
 > [!IMPORTANT] 
 > Risk (stanza `risk`) is assessed only if a valid `ABUSEIPDB_API_KEY` is provided. 
-> AbuseIP**DB** is allowing 1000 requests/day on the free tier, which is more than enough for hobby and non-commercial use.
+> AbuseIP**DB** request limits depend on your subscription; check your account before enabling it for a public deployment.
 
 ## License
 

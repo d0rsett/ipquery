@@ -11,8 +11,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 
 FROM gcr.io/distroless/static:nonroot
 
+WORKDIR /
+
 # Keep defaults like "./geolite/GeoLite2-City.mmdb" working:
-# distroless default WORKDIR is "/" so "./geolite/..." => "/geolite/..."
+# Set WORKDIR explicitly: nonroot base images may default to /home/nonroot.
 COPY --from=build /app /app
 
 # Bake the mmdbs into the image at /geolite

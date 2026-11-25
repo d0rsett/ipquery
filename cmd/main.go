@@ -8,12 +8,14 @@ import (
 	"strings"
 
 	ipqapi "github.com/akyriako/ipquery/api"
+	"github.com/akyriako/ipquery/response"
 	"github.com/caarlos0/env/v11"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
 type Config struct {
+	Response          response.Config
 	TrustedProxyCIDRs []string `env:"TRUSTED_PROXY_CIDRS" envSeparator:"," envDefault:"127.0.0.1/32,::1/128"`
 	ListenAddr        string   `env:"LISTEN_ADDR" envDefault:":8080"`
 	GeoLiteAsn        string   `env:"GEOLITE2_ASN" envDefault:"./geolite/GeoLite2-ASN.mmdb"`
@@ -27,6 +29,9 @@ func main() {
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
 		log.Fatalf("parse env: %v", err)
+	}
+	if err := cfg.Response.Validate(); err != nil {
+		log.Fatalf("response config: %v", err)
 	}
 
 	trusted, err := parseCIDRs(cfg.TrustedProxyCIDRs)
@@ -53,8 +58,13 @@ func main() {
 		risk := ipqapi.NewAbuseIpDbChecker(*cfg.AbuseIpDbApiKey)
 		lc.RiskChecker = risk
 	}
-	apis := ipqapi.Server{LookupClient: lc}
+	apis := ipqapi.Server{LookupClient: lc, ResponseConfig: &cfg.Response}
+	r := newRouter(&apis)
+	log.Printf("listening on %s", cfg.ListenAddr)
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, r))
+}
 
+func newRouter(apis *ipqapi.Server) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -67,8 +77,7 @@ func main() {
 	r.Get("/lookup/{ip}", apis.LookupIPAll)
 	r.Get("/health", apis.GetHealth)
 
-	log.Printf("listening on %s", cfg.ListenAddr)
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, r))
+	return r
 }
 
 func parseCIDRs(items []string) ([]*net.IPNet, error) {

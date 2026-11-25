@@ -5,12 +5,22 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"net/url"
 
+	"github.com/akyriako/ipquery/response"
 	"github.com/go-chi/chi/v5"
 )
 
 type Server struct {
 	*LookupClient
+	ResponseConfig *response.Config
+}
+
+func (s *Server) responseConfig() response.Config {
+	if s.ResponseConfig != nil {
+		return *s.ResponseConfig
+	}
+	return response.DefaultConfig()
 }
 
 func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
@@ -47,11 +57,23 @@ func (s *Server) LookupIPAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing ip parameter", http.StatusBadRequest)
 		return
 	}
+	ipStr, err := url.PathUnescape(ipStr)
+	if err != nil {
+		http.Error(w, "invalid ip", http.StatusBadRequest)
+		return
+	}
 
 	s.lookupIPAll(w, r, ipStr)
 }
 
 func (s *Server) lookupIPAll(w http.ResponseWriter, r *http.Request, ipStr string) {
+	w.Header().Add("Vary", "User-Agent")
+	w.Header().Add("Vary", "Accept")
+	mode, err := response.Resolve(r, s.responseConfig())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	ipNet := net.ParseIP(ipStr)
 	if ipNet == nil {
 		http.Error(w, "invalid ip", http.StatusBadRequest)
@@ -74,8 +96,19 @@ func (s *Server) lookupIPAll(w http.ResponseWriter, r *http.Request, ipStr strin
 		_ = s.RiskChecker.Enrich(ipNet, &res)
 	}
 
+	data, err := json.Marshal(res)
+	if err == nil {
+		data, err = response.Format(data, mode, s.responseConfig())
+	}
+	if err != nil {
+		http.Error(w, "response encoding failed", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(res)
+	if mode == "ansi" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	_, _ = w.Write(data)
 }
 
 func (s *Server) Index() http.HandlerFunc {
@@ -87,6 +120,12 @@ func (s *Server) Index() http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		if !response.Landing(r) {
+			s.GetOwnIPAll(w, r)
+			return
+		}
+		w.Header().Add("Vary", "User-Agent")
+		w.Header().Add("Vary", "Accept")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tpl.Execute(w, nil)
 	}
@@ -141,18 +180,18 @@ const landingHTML = `<!doctype html>
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 </head>
 
-<body class="h-screen bg-[hsl(var(--background))] text-[hsl(var(--foreground))] overflow-hidden">
-  <div class="h-full w-full p-4 flex flex-col gap-4">
+<body class="min-h-screen bg-[hsl(var(--background))] text-[hsl(var(--foreground))] overflow-x-hidden">
+  <div class="min-h-screen w-full p-3 sm:p-4 flex flex-col gap-4">
 
-      <div class="rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm p-6">
-        <label class="text-lg font-medium" for="searchBox">Self-hosted free Geolocation and Malicious IP Detection API</label>
+      <div class="shrink-0 min-w-0 rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm p-4 sm:p-6">
+        <label class="text-lg font-medium" for="searchBox">Geolocation and Malicious IP Detection API</label>
 
-        <div class="mt-2 flex gap-2">
+        <div class="mt-2 flex flex-col sm:flex-row gap-2">
           <input
             id="searchBox"
             type="text"
-            placeholder="Enter IPv4 address (e.g. 8.8.8.8)"
-            class="w-full h-10 rounded-[calc(var(--radius)-4px)] border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]"
+            placeholder="Enter IPv4 or IPv6 address"
+            class="w-full min-w-0 h-10 rounded-[calc(var(--radius)-4px)] border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 text-base sm:text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]"
           />
           <button
             id="searchBtn"
@@ -184,15 +223,40 @@ const landingHTML = `<!doctype html>
           >1.1.1.1</button>
         </div>
 
-        <p class="mt-3 text-xs text-[hsl(var(--muted-foreground))]">
-        </p>
+        <details class="mt-4 border-t border-[hsl(var(--border))] pt-3">
+          <summary class="cursor-pointer text-sm font-medium">How to use the API</summary>
+          <div class="mt-3 max-h-60 overflow-auto space-y-3 pr-2 text-sm">
+            <p class="text-[hsl(var(--muted-foreground))]">Run these commands in your terminal. Both IPv4 and IPv6 are supported.</p>
+            <div>
+              <p class="mb-1 font-medium">Your IP details, with terminal colors</p>
+              <pre class="overflow-x-auto rounded-md bg-[hsl(var(--muted))] p-3 text-xs"><code data-api-command="/">curl /</code></pre>
+            </div>
+            <div>
+              <p class="mb-1 font-medium">Look up any IP</p>
+              <pre class="overflow-x-auto rounded-md bg-[hsl(var(--muted))] p-3 text-xs"><code data-api-command="/lookup/8.8.8.8">curl /lookup/8.8.8.8</code></pre>
+            </div>
+            <div>
+              <p class="mb-1 font-medium">Plain JSON for scripts</p>
+              <pre class="overflow-x-auto rounded-md bg-[hsl(var(--muted))] p-3 text-xs"><code data-api-command="/own/all?format=json">curl '/own/all?format=json'</code></pre>
+            </div>
+            <div>
+              <p class="mb-1 font-medium">Readable JSON without colors</p>
+              <pre class="overflow-x-auto rounded-md bg-[hsl(var(--muted))] p-3 text-xs"><code data-api-command="/lookup/8.8.8.8?format=pretty">curl '/lookup/8.8.8.8?format=pretty'</code></pre>
+            </div>
+            <div>
+              <p class="mb-1 font-medium">Only your IP address</p>
+              <pre class="overflow-x-auto rounded-md bg-[hsl(var(--muted))] p-3 text-xs"><code data-api-command="/own">curl /own</code></pre>
+            </div>
+            <p class="text-xs text-[hsl(var(--muted-foreground))]">Choose a response with <code>format=json</code>, <code>pretty</code>, <code>ansi</code>, or <code>auto</code>. Auto detects your client; browsers receive JSON on API routes, while curl receives colors. For scripts, pipes, and saved files, use <code>format=json</code> or the <code>Accept: application/json</code> header.</p>
+          </div>
+        </details>
       </div>
 
-      <div class="flex-1 grid grid-cols-2 gap-4 min-h-0">
+      <div class="flex-1 lg:flex-none lg:h-[max(20rem,calc(100dvh-18rem))] min-w-0 grid grid-cols-1 lg:grid-cols-2 gap-4 lg:min-h-0">
 
-        <div class="min-h-0 rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm overflow-hidden flex flex-col">
+        <div class="min-w-0 min-h-[20rem] lg:min-h-0 rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm overflow-hidden flex flex-col">
 
-          <div class="px-4 py-3 border-b border-[hsl(var(--border))] flex items-center justify-between gap-3">
+          <div class="shrink-0 px-4 py-3 border-b border-[hsl(var(--border))] flex flex-wrap items-center justify-between gap-3">
             <!-- IP header (replaces "Result JSON") -->
             <div class="min-w-0 flex items-center gap-2">
               <div id="resolvedIP" class="text-xl font-bold tracking-tight truncate">—</div>
@@ -237,7 +301,7 @@ const landingHTML = `<!doctype html>
           </div>
 
           <!-- content -->
-          <div class="flex-1 min-h-0 overflow-auto bg-[hsl(var(--background))]">
+          <div class="flex-1 min-h-0 max-h-[60vh] lg:max-h-none overflow-auto bg-[hsl(var(--background))]">
             <pre id="jsonOut" class="p-4 text-sm"></pre>
 
             <div id="tableWrap" class="hidden p-4">
@@ -251,14 +315,17 @@ const landingHTML = `<!doctype html>
 
         </div>
 
-        <div class="min-h-0 rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm overflow-hidden flex flex-col">
+        <div class="min-w-0 min-h-[22rem] lg:min-h-0 rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))] shadow-sm overflow-hidden flex flex-col">
           <div class="px-4 py-3 border-b border-[hsl(var(--border))]">
             <h2 class="text-sm font-semibold">Location</h2>
             <p id="locationSummary" class="text-xs text-[hsl(var(--muted-foreground))]">
               Loading location…
             </p>
           </div>
-          <div id="map" class="flex-1"></div>
+          <div class="relative flex-1 min-h-[18rem] lg:min-h-0">
+            <div id="map" class="absolute inset-0"></div>
+            <p id="mapHint" role="status" class="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-[hsl(var(--muted-foreground))]">Look up a public IP to see its approximate location.</p>
+          </div>
         </div>
 
       </div>
@@ -287,6 +354,7 @@ const landingHTML = `<!doctype html>
   const viewToggleThumb = document.getElementById("viewToggleThumb");
 
   const locationSummary = document.getElementById("locationSummary");
+  const mapHint = document.getElementById("mapHint");
 
   let map = null;
   let marker = null;
@@ -334,6 +402,17 @@ const landingHTML = `<!doctype html>
     return true;
   }
 
+  function isValidIP(ip) {
+    if (isValidIPv4(ip)) return true;
+    if (!ip.includes(":") || !/^[0-9a-f:.]+$/i.test(ip)) return false;
+    try {
+      // The URL parser validates IPv6 literals locally, without a network request.
+      return new URL("http://[" + ip + "]/").hostname.startsWith("[");
+    } catch {
+      return false;
+    }
+  }
+
   function extractLatLon(data) {
     if (!data || typeof data !== "object") return null;
     if (!data.location || typeof data.location !== "object") return null;
@@ -343,6 +422,9 @@ const landingHTML = `<!doctype html>
 
     if (typeof lat !== "number" || typeof lon !== "number") return null;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+    // Missing GeoLite records use zero-valued coordinates and empty metadata.
+    if (lat === 0 && lon === 0 && !data.location.country_code && !data.location.timezone) return null;
 
     return { lat: lat, lon: lon };
   }
@@ -506,7 +588,15 @@ const landingHTML = `<!doctype html>
   }
 
   function setMarker(lon, lat) {
+    if (typeof maplibregl === "undefined") {
+      mapHint.textContent = "The map could not load. IP details are still available.";
+      mapHint.classList.remove("hidden");
+      return;
+    }
     ensureMap([lon, lat]);
+    mapHint.classList.add("hidden");
+    document.getElementById("map").style.visibility = "visible";
+    map.resize();
 
     if (!marker) {
       marker = new maplibregl.Marker().setLngLat([lon, lat]).addTo(map);
@@ -554,6 +644,11 @@ const landingHTML = `<!doctype html>
       const coords = extractLatLon(data);
       if (coords) {
         setMarker(coords.lon, coords.lat);
+      } else {
+        if (marker) { marker.remove(); marker = null; }
+        document.getElementById("map").style.visibility = "hidden";
+        mapHint.textContent = "Location data is unavailable for this IP.";
+        mapHint.classList.remove("hidden");
       }
     } catch (err) {
       jsonOut.textContent = "Fetch error: " + (err && err.message ? err.message : String(err));
@@ -569,6 +664,12 @@ const landingHTML = `<!doctype html>
   	return basePath() + path;
   }
 
+  // Use the current deployment URL, including a reverse proxy path prefix.
+  document.querySelectorAll("[data-api-command]").forEach(function (code) {
+    const url = window.location.origin + apiUrl(code.getAttribute("data-api-command"));
+    code.textContent = "curl '" + url + "'";
+  });
+
   function loadOwnAll() {
   	fetchAndRender(apiUrl("/own/all"));
   }
@@ -580,8 +681,8 @@ const landingHTML = `<!doctype html>
       showSearchError("IP address is required.");
       return;
     }
-    if (!isValidIPv4(v)) {
-      showSearchError("Invalid IPv4 address. Example: 8.8.8.8");
+    if (!isValidIP(v)) {
+      showSearchError("Invalid IP address. Enter an IPv4 or IPv6 address.");
       return;
     }
 
